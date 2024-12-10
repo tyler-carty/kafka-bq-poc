@@ -1,5 +1,7 @@
+import os
+
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import from_json, col, current_timestamp
+from pyspark.sql.functions import from_json, col
 from pyspark.sql.types import StructType, StructField, StringType, IntegerType, TimestampType
 import logging
 from datetime import datetime
@@ -21,7 +23,6 @@ class SparkKafkaToBigQuery:
         self.table_id = f"{PROJECT_ID}.{DATASET_ID}.{TABLE_ID}"
 
     def _create_spark_session(self):
-        """Initialize Spark session with required configurations"""
         return (SparkSession.builder
                 .appName("KafkaToBigQuery")
                 .config("spark.jars.packages",
@@ -29,11 +30,14 @@ class SparkKafkaToBigQuery:
                         "com.google.cloud.spark:spark-bigquery-with-dependencies_2.12:0.27.1")
                 .config("spark.hadoop.google.cloud.auth.service.account.enable", "true")
                 .config("spark.hadoop.google.cloud.auth.service.account.json.keyfile",
-                        "${GOOGLE_APPLICATION_CREDENTIALS}")
+                        os.environ['GOOGLE_APPLICATION_CREDENTIALS'])
+                .config("spark.hadoop.fs.gs.impl",
+                        "com.google.cloud.hadoop.fs.gcs.GoogleHadoopFileSystem")
+                .config("spark.hadoop.fs.gs.auth.service.account.enable", "true")
                 .getOrCreate())
 
     def _create_schema(self):
-        """Define schema matching our Kafka message structure"""
+        # Match the schema from our test producer
         return StructType([
             StructField("timestamp", TimestampType()),
             StructField("user_id", IntegerType()),
@@ -41,55 +45,46 @@ class SparkKafkaToBigQuery:
             StructField("value", IntegerType())
         ])
 
-    def read_from_kafka(self):
-        """Read data from Kafka topic"""
-        logger.info(f"Starting to read from Kafka topic: {KAFKA_TOPIC}")
-
-        return (self.spark.read
-                .format("kafka")
-                .option("kafka.bootstrap.servers", KAFKA_BOOTSTRAP_SERVERS)
-                .option("subscribe", KAFKA_TOPIC)
-                .option("startingOffsets", "earliest")
-                .option("endingOffsets", "latest")
-                .load())
-
     def process_batch(self):
-        """Process one batch of data"""
         try:
-            start_time = datetime.now()
-            logger.info("Starting batch processing")
+            logger.info(f"Starting batch processing from topic {KAFKA_TOPIC}")
 
             # Read from Kafka
-            df = self.read_from_kafka()
+            df = (self.spark.read
+                  .format("kafka")
+                  .option("kafka.bootstrap.servers", KAFKA_BOOTSTRAP_SERVERS)
+                  .option("subscribe", KAFKA_TOPIC)
+                  .option("startingOffsets", "earliest")
+                  .option("endingOffsets", "latest")
+                  .load())
 
-            # Parse JSON data
+            # Parse the value column which contains our JSON data
             parsed_df = df.select(
                 from_json(col("value").cast("string"), self.schema).alias("data")
             ).select("data.*")
 
             # Count records
             record_count = parsed_df.count()
-            logger.info(f"Processing {record_count} records")
+            logger.info(f"Found {record_count} records to process")
 
             if record_count > 0:
                 # Write to BigQuery
                 (parsed_df.write
                  .format("bigquery")
                  .option("table", self.table_id)
-                 .option("temporaryGcsBucket", f"{PROJECT_ID}-temp")  # Need to create this
+                 .option("temporaryGcsBucket", f"{PROJECT_ID}-temp")  # Make sure this bucket exists
+                 .option("parentProject", PROJECT_ID)
                  .mode("append")
                  .save())
 
-                duration = (datetime.now() - start_time).total_seconds()
-                logger.info(f"Batch complete. Processed {record_count} records in {duration:.2f} seconds")
+                logger.info(f"Successfully wrote {record_count} records to BigQuery")
             else:
-                logger.info("No new records to process")
+                logger.info("No records to process")
 
         except Exception as e:
             logger.error(f"Error processing batch: {str(e)}")
             raise
         finally:
-            logger.info("Cleaning up Spark session")
             self.spark.stop()
 
 if __name__ == "__main__":
