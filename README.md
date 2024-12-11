@@ -1,49 +1,61 @@
-# Kafka to BigQuery Data Pipeline with Spark
+# Kafka to BigQuery Data Pipeline with Spark Streaming
 
 ## Purpose
-This project demonstrates a batch ingestion pipeline that reads data from a Kafka topic and loads it into BigQuery using Apache Spark. It's designed as a proof of concept for processing large volumes of data with the following features:
-- Batch processing of Kafka messages
-- Parallel processing using Spark
-- Efficient loading into BigQuery
+This project implements a real-time streaming pipeline that continuously reads data from a Kafka topic and streams it into BigQuery using Apache Spark Structured Streaming. It demonstrates:
+- Real-time data streaming from Kafka
+- Micro-batch processing using Spark Structured Streaming
+- Direct streaming writes to BigQuery
 - Containerized deployment using Docker
 
 ## Architecture
 ```
-Kafka Topic → Apache Spark → Google Cloud Storage (temp) → BigQuery
+Test Producer → Kafka Topic → Spark Streaming → BigQuery
 ```
 
 ### Components
-- **Kafka Consumer**: Reads messages in batches from specified Kafka topic
-- **Spark Processing**: Handles data transformation and batch processing
-- **BigQuery Loader**: Loads processed data into BigQuery tables
-- **Docker Containers**: Manages dependencies and runtime environment
+- **Test Producer**: Python script generating sample event data
+- **Kafka**: Message broker for data streaming
+- **Spark Streaming Consumer**: PySpark application for continuous data processing
+- **BigQuery**: Destination for streamed data
 
 ## Prerequisites
 - Docker and Docker Compose installed
 - Google Cloud Platform account with:
     - BigQuery dataset created
-    - Storage bucket for temporary data
-    - Service account with appropriate permissions:
+    - Service account with permissions:
+        - BigQuery Data Editor
         - BigQuery Job User
-        - Storage Object Admin
-        - Storage Admin
 
 ## Project Structure
 ```
 kafka-bq-poc/
 ├── docker-compose.yml
-├── requirements.txt
-├── spark.Dockerfile
+├── requirements.producer.txt
+├── requirements.spark.txt
 ├── producer.Dockerfile
+├── spark.Dockerfile
 ├── src/
 │   ├── config.py
-│   ├── producer.py
+│   ├── test_producer.py
 │   └── spark_consumer.py
 └── .env
 ```
 
-## Configuration
-Create a `.env` file with:
+## Setup Instructions
+
+### 1. Initial Setup
+```bash
+# Clone the repository
+git clone https://github.com/tyler-carty/kafka-bq-poc
+cd kafka-bq-poc
+
+# Create Python virtual environment (optional, for local development)
+python -m venv .venv
+source .venv/bin/activate  # or `.venv\Scripts\activate` on Windows
+```
+
+### 2. Configure Environment
+1. Create a `.env` file:
 ```
 KAFKA_BOOTSTRAP_SERVERS=kafka:9092
 KAFKA_TOPIC=test-events
@@ -52,82 +64,117 @@ BIGQUERY_DATASET=your_dataset
 BIGQUERY_TABLE=test_events
 ```
 
-## Setup Instructions
-
-1. Clone the repository:
-```bash
-git clone https://github.com/tyler-carty/kafka-bq-poc
-cd kafka-bq-poc
-```
-
 2. Set up Google Cloud credentials:
-- Create a service account and download JSON key
-- Place the key file in project root
-- Update environment variables in .env
+- Create a service account with BigQuery permissions
+- Download the JSON key
+- Save it as `service-account.json` in project root
 
-3. Start the services:
+3. Create BigQuery table:
+```sql
+CREATE TABLE IF NOT EXISTS `your-project.dataset.test_events`
+(
+    timestamp TIMESTAMP,
+    user_id INT64,
+    action STRING,
+    value INT64
+)
+PARTITION BY DATE(timestamp)
+```
+
+## Running the Pipeline
+
+### 1. Start the Infrastructure
 ```bash
+# Start all services
 docker-compose up -d
-```
 
-4. Generate test data:
-```bash
-docker-compose run producer
-```
-
-5. Run the Spark consumer:
-```bash
-docker-compose run spark python src/spark_consumer.py
-```
-
-## Usage
-
-### Running a Batch Job
-The pipeline is designed to run as a batch job. To process data:
-
-1. Ensure Kafka and other services are running:
-```bash
+# Check services are running
 docker-compose ps
 ```
 
-2. Run the Spark consumer:
+### 2. Watch the Consumer Logs
 ```bash
-docker-compose run spark python src/spark_consumer.py
+# In one terminal, watch the streaming consumer
+docker-compose logs -f spark
 ```
 
-3. Verify data in BigQuery:
+### 3. Generate Test Data
+```bash
+# In another terminal, run the test producer
+docker-compose run producer
+```
+
+### 4. Verify Data Flow
 ```sql
+-- Check BigQuery for new records
 SELECT COUNT(*) 
 FROM `your-project.dataset.test_events`
+WHERE DATE(timestamp) = CURRENT_DATE()
 ```
 
-This will create sample messages in the Kafka topic.
+## How It Works
 
-## Maintenance
+### Data Flow
+1. Test producer generates events with:
+    - timestamp
+    - user_id (random 1-1000)
+    - action (click/view/purchase)
+    - value (random 1-100)
 
-### Cleaning Up
+2. Spark Streaming consumer:
+    - Continuously reads from Kafka topic
+    - Processes data in micro-batches every 10 seconds
+    - Writes directly to BigQuery using streaming inserts
+
+### Monitoring
+- Watch Spark streaming progress:
 ```bash
-# Stop all services
-docker-compose down
-
-# Remove temporary data
-docker-compose down -v
+docker-compose logs -f spark
 ```
-
-### Updating
-1. Pull latest code changes
-2. Rebuild containers:
+- Monitor Kafka topics:
 ```bash
-docker-compose build --no-cache
+docker-compose exec kafka kafka-topics.sh --list --bootstrap-server localhost:9092
 ```
 
 ## Development
 
-### Adding New Features
-1. Modify src/spark_consumer.py for new processing logic
-2. Update Dockerfile if new dependencies are required
-3. Rebuild and test changes:
+### Local Development
+1. Install dependencies in your virtual environment:
 ```bash
-docker-compose build spark
-docker-compose run spark python src/spark_consumer.py
+pip install -r requirements.producer.txt  # For producer development
+pip install -r requirements.spark.txt     # For consumer development
 ```
+
+2. Make changes to code in `src/`
+
+3. Rebuild and restart services:
+```bash
+docker-compose down
+docker-compose build
+docker-compose up -d
+```
+
+### Cleaning Up
+```bash
+# Stop all services and remove containers
+docker-compose down
+
+# Include --remove-orphans if you see orphaned container warnings
+docker-compose down --remove-orphans
+```
+
+## Troubleshooting
+
+### Common Issues
+1. "Connection refused" to Kafka:
+    - Ensure Kafka container is running and healthy
+    - Check `KAFKA_BOOTSTRAP_SERVERS` in .env
+
+2. BigQuery permissions:
+    - Verify service account has BigQuery Data Editor role
+    - Check `service-account.json` is present and valid
+
+3. No data flowing:
+    - Check Spark consumer logs for errors
+    - Verify Kafka topic exists and contains messages
+    - Ensure BigQuery table schema matches expected format
